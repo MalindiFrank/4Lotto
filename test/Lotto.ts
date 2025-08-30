@@ -1,16 +1,17 @@
 import { expect } from "chai";
 import { network } from "hardhat";
 
-const { ethers } = await network.connect();
-
 describe("Lotto", function () {
   let lotto: any;
   let manager: any;
   let player1: any;
   let player2: any;
   let player3: any;
+  let ethers: any;
 
   beforeEach(async function () {
+    const networkConnection = await network.connect();
+    ethers = networkConnection.ethers;
     [manager, player1, player2, player3] = await ethers.getSigners();
     lotto = await ethers.deployContract("Lotto");
   });
@@ -39,7 +40,7 @@ describe("Lotto", function () {
     it("Should reject entry with insufficient fee", async function () {
       await expect(
         lotto.connect(player1).enter({ value: ethers.parseEther("0.005") })
-      ).to.be.revertedWith("Minimum entry fee required");
+      ).to.be.revertedWithReason("Minimum entry fee required");
     });
 
     it("Should reject duplicate entries", async function () {
@@ -47,13 +48,13 @@ describe("Lotto", function () {
 
       await expect(
         lotto.connect(player1).enter({ value: ethers.parseEther("0.01") })
-      ).to.be.revertedWith("Already entered");
+      ).to.be.revertedWithReason("Already entered");
     });
 
     it("Should reject manager participation", async function () {
       await expect(
         lotto.connect(manager).enter({ value: ethers.parseEther("0.01") })
-      ).to.be.revertedWith("Manager cannot participate");
+      ).to.be.revertedWithReason("Manager cannot participate");
     });
 
     it("Should accumulate prize pool", async function () {
@@ -70,7 +71,7 @@ describe("Lotto", function () {
     it("Should reject starting with no players", async function () {
       await expect(
         lotto.connect(manager).startLottery()
-      ).to.be.revertedWith("No players in the lottery");
+      ).to.be.revertedWithReason("No players in the lottery");
     });
 
     it("Should reject non-manager starting lottery", async function () {
@@ -78,7 +79,7 @@ describe("Lotto", function () {
 
       await expect(
         lotto.connect(player1).startLottery()
-      ).to.be.revertedWith("Only manager can call this function");
+      ).to.be.revertedWithReason("Only manager can call this function");
     });
 
     it("Should select winner and reset lottery", async function () {
@@ -121,7 +122,7 @@ describe("Lotto", function () {
 
       await expect(
         lotto.connect(player1).enter({ value: ethers.parseEther("0.01") })
-      ).to.be.revertedWith("Contract is paused");
+      ).to.be.revertedWithReason("Contract is paused");
     });
 
     it("Should allow emergency withdrawal when paused", async function () {
