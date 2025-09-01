@@ -1,134 +1,127 @@
 // SPDX-License-Identifier: MIT
-
 pragma solidity ^0.8.0;
 
 contract Lotto {
-  address private manager;
-  address private winner;
-  address[] private players;
-  uint256 private minimumEntry = 0.01 ether;
-  uint256 private nonce;
-  bool private paused;
-  bool private locked;
+    address public manager;
+    // fixed-size array for gas efficiency
+    address[10] private players; 
+    uint256 public playerCount;
+    mapping(address => bool) public hasEntered;
+    mapping(address => uint256) public deposits;
+    address public winner;
+    uint256 public prizePool;
+    uint256 public constant MIN_ENTRY = 0.000000001 ether;
+    uint256 public constant MAX_PLAYERS = 10;
+    uint256 public constant MANAGER_FEE = 1; // 1%
+    uint256 public lotteryDeadline;
+    uint256 public constant DURATION = 72 hours;
+    bool public paused;
+    bool private locked;
 
-  mapping(address => bool) private hasEntered;
+    event PlayerEntered(address player, uint256 amount);
+    event WinnerSelected(address winner);
+    event PrizeClaimed(address winner, uint256 amount);
+    event RefundIssued(address player, uint256 amount);
+    event LotteryReset();
 
-  event PlayerEntered(address indexed player, uint256 amount);
-  event WinnerSelected(address indexed winner, uint256 amount);
-  event LottoReset();
-
-  constructor() {
-    manager = msg.sender;
-  }
-
-  modifier restricted() {
-    require(msg.sender == manager, "Only manager can call this function");
-    _;
-  }
-
-  modifier nonReentrant() {
-    require(!locked, "Reentrant call");
-    locked = true;
-    _;
-    locked = false;
-  }
-
-  function reset() private {
-    for (uint256 i = 0; i < players.length; i++) {
-      hasEntered[players[i]] = false;
+    modifier onlyManager() {
+        require(msg.sender == manager, "Only manager");
+        _;
     }
-    players = new address[](0);
-    winner = address(0);
-    emit LottoReset();
-  }
 
-  function startLottery() public restricted nonReentrant {
-    require(players.length > 0, "No players in the lottery");
-    selectWinner();
-    reset();
-  }
+    modifier nonReentrant() {
+        require(!locked, "Reentrancy guard");
+        locked = true;
+        _;
+        locked = false;
+    }
 
-  function enter() public payable nonReentrant {
-    require(!paused, "Contract is paused");
-    require(msg.value >= minimumEntry, "Minimum entry fee required");
-    require(!hasEntered[msg.sender], "Already entered");
-    require(msg.sender != manager, "Manager cannot participate");
+    constructor() {
+        manager = msg.sender;
+    }
 
-    players.push(msg.sender);
-    hasEntered[msg.sender] = true;
+    function enter() external payable nonReentrant {
+        require(!paused, "Paused");
+        require(msg.value >= MIN_ENTRY, "Insufficient funds");
+        require(!hasEntered[msg.sender], "Already entered");
+        require(playerCount < MAX_PLAYERS, "Max players reached");
 
-    emit PlayerEntered(msg.sender, msg.value);
-  }
+        if (playerCount == 0) {
+            lotteryDeadline = block.timestamp + DURATION;
+        }
 
-  function transferFunds(address addr) private {
-    uint256 amount = address(this).balance;
-    winner = addr;
+        players[playerCount] = msg.sender;
+        hasEntered[msg.sender] = true;
+        deposits[msg.sender] = msg.value;
+        prizePool += msg.value;
+        playerCount++;
+        emit PlayerEntered(msg.sender, msg.value);
+    }
 
-    (bool success, ) = payable(addr).call{value: amount}("");
-    require(success, "Transfer failed");
+    function startLottery() external onlyManager nonReentrant {
+        require(!paused, "Paused");
+        require(block.timestamp < lotteryDeadline, "Deadline passed");
+        require(playerCount > 0, "No players");
 
-    emit WinnerSelected(addr, amount);
-  }
+        // simple randomness to choose winner
+        winner = players[uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao))) % playerCount];
+        emit WinnerSelected(winner);
+    }
 
-  function selectWinner() private {
-    require(players.length > 0, "No players");
-    address winnerAddress = getRandomAddress(players);
-    transferFunds(winnerAddress);
-  }
+    function forceEnd() external nonReentrant {
+        require(block.timestamp >= lotteryDeadline, "Deadline not passed");
+        require(playerCount > 0, "No players");
+        // players must call claimRefund() individually
+    }
 
-  function getRandomAddress(address[] memory addrArr) private returns (address) {
-    nonce++;
-    uint256 randomIndex = uint256(
-      keccak256(
-        abi.encodePacked(
-          block.timestamp,
-          block.prevrandao,
-          nonce,
-          addrArr.length
-        )
-      )
-    ) % addrArr.length;
+    function claimRefund() external nonReentrant {
+        uint256 amount = deposits[msg.sender];
+        require(amount > 0, "No refund");
+        require(block.timestamp >= lotteryDeadline, "Deadline not passed");
 
-    return addrArr[randomIndex];
-  }
+        deposits[msg.sender] = 0;
+        (bool success, ) = msg.sender.call{value: amount}("");
+        require(success, "Transfer failed");
+        emit RefundIssued(msg.sender, amount);
+    }
 
-  function pause() public restricted {
-    paused = !paused;
-  }
+    function claimPrize() external nonReentrant {
+        require(msg.sender == winner, "Not winner");
+        require(prizePool > 0, "No prize");
 
-  function emergencyWithdraw() public restricted {
-    require(paused, "Must be paused");
-    uint256 amount = address(this).balance;
+        uint256 fee = (prizePool * MANAGER_FEE) / 100;
+        uint256 prize = prizePool - fee;
 
-    (bool success, ) = payable(manager).call{value: amount}("");
-    require(success, "Withdrawal failed");
+        (bool success, ) = winner.call{value: prize}("");
+        require(success, "Prize transfer failed");
 
-    reset();
-  }
+        (success, ) = manager.call{value: fee}("");
+        require(success, "Fee transfer failed");
 
-  function getPlayersCount() public view returns (uint256) {
-    return players.length;
-  }
+        emit PrizeClaimed(winner, prize);
+        _reset();
+    }
 
-  function isPaused() public view returns (bool) {
-    return paused;
-  }
+    function _reset() private {
+        prizePool = 0;
+        winner = address(0);
+        lotteryDeadline = 0;
+        playerCount = 0;
 
-  function hasPlayerEntered(address player) public view returns (bool) {
-    return hasEntered[player];
-  }
+        // clear player data ~fixed array is automatically reset
+        for (uint256 i = 0; i < MAX_PLAYERS; i++) {
+            hasEntered[players[i]] = false;
+            deposits[players[i]] = 0;
+        }
+    }
 
-  function getLottoInfo() public view returns (
-    uint256 playerCount,
-    uint256 prizePool,
-    uint256 minimumEntryFee,
-    address winnerAddress,
-    address[] memory playersAddress
-  ) {
-    return (players.length, address(this).balance, minimumEntry, winner, players);
-  }
+    // emergency functions
+    function setPaused(bool _paused) external onlyManager {
+        paused = _paused;
+    }
 
-  function getPlayers() public view returns (address[] memory) {
-    return players;
-  }
+    function emergencyWithdraw() external onlyManager {
+        require(paused, "Only when paused");
+        payable(manager).transfer(address(this).balance);
+    }
 }
